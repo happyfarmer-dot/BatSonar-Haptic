@@ -6,6 +6,8 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * FMCW 測距單幀輸出結果。
@@ -18,17 +20,18 @@ data class FmcwMeasurement(
     val distanceMeters: Float?,
     val echoStrength: Float,
     val snrRatio: Float,
+    val rxRms: Float,
     val spectrumSlice: FloatArray
 )
 
 /**
  * 純 Kotlin FMCW 差頻測距處理器：
  * 1. 狀態式 15 kHz 高通濾波器消除環境低頻噪聲
- * 2. 兩幀歷史滑動緩衝區（4,800 samples）與機身直達波互相關對齊（Tx-Rx 同步鎖定）
+ * 2. 兩幀歷史滑動緩衝區（4,800 samples）與正交包絡互相關對齊（Tx-Rx 同步鎖定）
  * 3. 混頻解調（Dechirping）：時域逐點乘上原始參考 Chirp 並套用漢寧窗
  * 4. 2048 點 Radix-2 FFT 計算差頻頻譜
  * 5. 機身直達波靜態基線消除（對空採集 1 秒 = 20 幀平均頻譜）
- * 6. 在 [0.3 m, maxDistanceMeters] 頻段尋找最大峰值，經拋物線插值換算障礙物距離與反射強度
+ * 6. 支援 1–10 級靈敏度調整，針對 UNPROCESSED 低增益麥克風優化微弱回波門檻
  */
 class FmcwProcessor {
 
@@ -49,15 +52,32 @@ class FmcwProcessor {
 
         // 1 秒 = 20 個 50 ms 幀
         const val CALIBRATION_FRAMES: Int = 20
-
-        // 檢測靈敏度門檻（針對正規化 PCM16 訊號 + 2048 點 FFT 幅度尺度）
-        private const val MIN_PEAK_MAGNITUDE: Double = 1.2e-4
-        private const val MIN_SNR_RATIO: Double = 2.35
+        const val DEFAULT_SENSITIVITY: Int = 7
     }
 
     private val fft = Radix2Fft(FFT_SIZE)
     private val highPassFilter = HighPassFilter(sampleRate = SAMPLE_RATE, cutoffHz = 15_000.0)
     private val referenceChirp: DoubleArray = ChirpGenerator.generateReferenceChirp()
+
+    // 90° 正交參考 Chirp（cos 相位），用於包絡相關對齊，避免 19 kHz 載波相位造成鎖定抖動
+    private val referenceChirpQuad: DoubleArray = DoubleArray(CHIRP_SAMPLES).also { quad ->
+        val sweepRateHalf = BANDWIDTH_HZ / (2.0 * CHIRP_DURATION_SEC)
+        for (n in 0 until CHIRP_SAMPLES) {
+            val t = n.toDouble() / SAMPLE_RATE
+            val phase = 2.0 * PI * (ChirpGenerator.START_FREQ_HZ * t + sweepRateHalf * t * t)
+            val window = when {
+                n < ChirpGenerator.FADE_SAMPLES -> {
+                    0.5 * (1.0 - cos(PI * n / ChirpGenerator.FADE_SAMPLES))
+                }
+                n >= CHIRP_SAMPLES - ChirpGenerator.FADE_SAMPLES -> {
+                    val k = CHIRP_SAMPLES - 1 - n
+                    0.5 * (1.0 - cos(PI * k / ChirpGenerator.FADE_SAMPLES))
+                }
+                else -> 1.0
+            }
+            quad[n] = cos(phase) * window
+        }
+    }
 
     // Dechirp 後乘上的 1920 點漢寧窗，可大幅抑制 0 Hz 附近殘餘直達波旁瓣洩漏
     private val dechirpHannWindow = DoubleArray(CHIRP_SAMPLES) { n ->
@@ -92,9 +112,6 @@ class FmcwProcessor {
     private var smoothedDistance: Double? = null
     private var missCounter: Int = 0
 
-    /**
-     * 啟動 1 秒環境校準流程（重置歷史狀態並採集 20 幀靜態頻譜基線）。
-     */
     @Synchronized
     fun startCalibration() {
         calibrationSum.fill(0.0)
@@ -107,9 +124,6 @@ class FmcwProcessor {
         missCounter = 0
     }
 
-    /**
-     * 完全重置處理器狀態（停止聲納時呼叫）。
-     */
     @Synchronized
     fun reset() {
         highPassFilter.reset()
@@ -127,24 +141,33 @@ class FmcwProcessor {
 
     /**
      * 輸入一段 50 ms（2,400 samples）麥克風正規化訊號進行處理。
+     * @param sensitivity 靈敏度 1..10（預設 7；越高對遠距與低增益回波越敏感）
      */
     @Synchronized
     fun processFrame(
         rxFrame2400: DoubleArray,
-        maxDistanceMeters: Double
+        maxDistanceMeters: Double,
+        sensitivity: Int = DEFAULT_SENSITIVITY
     ): FmcwMeasurement {
         require(rxFrame2400.size == FRAME_SAMPLES) {
             "Expected $FRAME_SAMPLES samples, got ${rxFrame2400.size}"
         }
         val clampedMaxDist = maxDistanceMeters.coerceIn(1.0, MAX_DISTANCE_LIMIT_METERS)
+        val clampedSens = sensitivity.coerceIn(1, 10)
 
-        // 1. 高通濾波並推入 4800 點滑動緩衝
+        // 1. 高通濾波並推入 4800 點滑動緩衝，同時計算 15 kHz 以上頻段 RMS
         highPassFilter.processBlock(rxFrame2400, filteredChunk)
+        var sumSq = 0.0
+        for (i in filteredChunk.indices) {
+            val v = filteredChunk[i]
+            sumSq += v * v
+        }
+        val rxRms = sqrt(sumSq / FRAME_SAMPLES).toFloat()
+
         System.arraycopy(hpHistory, FRAME_SAMPLES, hpHistory, 0, FRAME_SAMPLES)
         System.arraycopy(filteredChunk, 0, hpHistory, FRAME_SAMPLES, FRAME_SAMPLES)
         framesReceived++
 
-        // 尚未累積滿 2 幀歷史時先回傳等待狀態
         if (framesReceived < 2) {
             return FmcwMeasurement(
                 isCalibrating = isCalibrating,
@@ -154,11 +177,12 @@ class FmcwProcessor {
                 distanceMeters = null,
                 echoStrength = 0f,
                 snrRatio = 0f,
+                rxRms = rxRms,
                 spectrumSlice = FloatArray(0)
             )
         }
 
-        // 2. 直達波對齊：初次全搜尋，後續在鎖定點 ±8 samples 微調追蹤
+        // 2. 正交包絡對齊：初次全搜尋，後續在鎖定點 ±8 samples 微調追蹤
         val syncOffset = if (lockedSyncOffset < 0) {
             findFullSyncOffset(hpHistory).also { lockedSyncOffset = it }
         } else {
@@ -193,6 +217,7 @@ class FmcwProcessor {
                 distanceMeters = null,
                 echoStrength = 0f,
                 snrRatio = 0f,
+                rxRms = rxRms,
                 spectrumSlice = FloatArray(0)
             )
         }
@@ -229,24 +254,28 @@ class FmcwProcessor {
                 noiseCount++
             }
         }
-        val noiseFloor = if (noiseCount > 0) max(noiseSum / noiseCount, 1e-9) else 1e-9
+        val noiseFloor = if (noiseCount > 0) max(noiseSum / noiseCount, 1e-10) else 1e-10
         val snr = peakVal / noiseFloor
+
+        // 依據靈敏度 (1..10) 動態調整檢測門檻，適配 UNPROCESSED 低增益麥克風
+        val sensFactor = (clampedSens - 1) / 9.0 // 0.0 (最低靈敏度) .. 1.0 (最高靈敏度)
+        val minSnrThreshold = 3.10 - sensFactor * 1.50 // 3.10 -> 1.60
+        val minPeakThreshold = 2.5e-5 * Math.pow(0.08, sensFactor) // 2.5e-5 -> 2.0e-6
 
         // 提取視覺化頻譜片段（正規化 0..1）
         val sliceLen = (maxBin - minBin + 1).coerceAtLeast(1)
         val slice = FloatArray(sliceLen)
-        val normDenom = max(peakVal, MIN_PEAK_MAGNITUDE * 4.0)
+        val normDenom = max(peakVal, minPeakThreshold * 4.0)
         for (i in 0 until sliceLen) {
             slice[i] = (residualSpectrum[minBin + i] / normDenom).toFloat().coerceIn(0f, 1f)
         }
 
-        val isValidObstacle = peakVal >= MIN_PEAK_MAGNITUDE && snr >= MIN_SNR_RATIO
+        val isValidObstacle = peakVal >= minPeakThreshold && snr >= minSnrThreshold
 
         val detectedDistance: Double?
         val echoStrength: Float
 
         if (isValidObstacle) {
-            // 拋物線子頻點插值（Parabolic interpolation）提升距離解析度
             val refinedBin = if (peakBin > minBin && peakBin < maxBin) {
                 val yLeft = residualSpectrum[peakBin - 1]
                 val yCenter = residualSpectrum[peakBin]
@@ -264,7 +293,6 @@ class FmcwProcessor {
 
             val rawDistance = binToDistance(refinedBin).coerceIn(MIN_DISTANCE_METERS, clampedMaxDist)
 
-            // 指數平滑濾波，避免數值劇烈跳動同時維持快速反應
             val prev = smoothedDistance
             smoothedDistance = if (prev == null || abs(rawDistance - prev) > 0.65) {
                 rawDistance
@@ -274,14 +302,12 @@ class FmcwProcessor {
             missCounter = 0
             detectedDistance = smoothedDistance
 
-            // 結合 SNR 與峰值幅度映射出直覺的回波強度 [0..1]
-            val snrScore = ((snr - MIN_SNR_RATIO) / 10.0).coerceIn(0.0, 1.0)
-            val ampScore = (peakVal / 0.015).coerceIn(0.0, 1.0)
-            echoStrength = (0.65 * snrScore + 0.35 * ampScore).toFloat().coerceIn(0.08f, 1.0f)
+            val snrScore = ((snr - minSnrThreshold) / 7.5).coerceIn(0.0, 1.0)
+            val ampScore = (peakVal / (minPeakThreshold * 80.0)).coerceIn(0.0, 1.0)
+            echoStrength = (0.70 * snrScore + 0.30 * ampScore).toFloat().coerceIn(0.10f, 1.0f)
         } else {
             missCounter++
             if (missCounter <= 2 && smoothedDistance != null) {
-                // 短暫漏檢保持最後距離 2 幀（約 100 ms）避免畫面閃爍
                 detectedDistance = smoothedDistance
                 echoStrength = 0.05f
             } else {
@@ -299,13 +325,11 @@ class FmcwProcessor {
             distanceMeters = detectedDistance?.toFloat(),
             echoStrength = echoStrength,
             snrRatio = snr.toFloat(),
+            rxRms = rxRms,
             spectrumSlice = slice
         )
     }
 
-    /**
-     * 執行混頻解調與 2048 點 Radix-2 FFT（開放給單元測試與主流程使用）。
-     */
     internal fun computeDechirpSpectrum(
         rxBuffer: DoubleArray,
         startOffset: Int,
@@ -324,66 +348,70 @@ class FmcwProcessor {
     }
 
     /**
-     * 透過與參考 Chirp 的粗/細兩階段互相關，找出機身直達波在 50 ms 週期中的起始索引。
+     * 使用 I/Q 正交包絡相關（I² + Q²）找出機身直達波在 50 ms 週期中的起始索引。
      */
     private fun findFullSyncOffset(history4800: DoubleArray): Int {
         var bestCoarseOffset = 0
-        var bestCoarseScore = -1.0
+        var bestCoarseEnergy = -1.0
 
-        // 粗搜：步長 6 samples、內迴圈步長 4（極快且精準鎖定包絡）
         var offset = 0
         while (offset < FRAME_SAMPLES) {
-            var corr = 0.0
+            var corrI = 0.0
+            var corrQ = 0.0
             var n = 0
             while (n < CHIRP_SAMPLES) {
-                corr += history4800[offset + n] * referenceChirp[n]
+                val sample = history4800[offset + n]
+                corrI += sample * referenceChirp[n]
+                corrQ += sample * referenceChirpQuad[n]
                 n += 4
             }
-            val score = abs(corr)
-            if (score > bestCoarseScore) {
-                bestCoarseScore = score
+            val energy = corrI * corrI + corrQ * corrQ
+            if (energy > bestCoarseEnergy) {
+                bestCoarseEnergy = energy
                 bestCoarseOffset = offset
             }
             offset += 6
         }
 
-        // 細搜：在粗搜峰值 ±10 samples 內逐樣本鎖定
         var bestOffset = bestCoarseOffset
-        var bestScore = -1.0
+        var bestEnergy = -1.0
         val start = max(0, bestCoarseOffset - 10)
         val end = min(FRAME_SAMPLES - 1, bestCoarseOffset + 10)
 
         for (cand in start..end) {
-            var corr = 0.0
+            var corrI = 0.0
+            var corrQ = 0.0
             for (n in 0 until CHIRP_SAMPLES step 2) {
-                corr += history4800[cand + n] * referenceChirp[n]
+                val sample = history4800[cand + n]
+                corrI += sample * referenceChirp[n]
+                corrQ += sample * referenceChirpQuad[n]
             }
-            val score = abs(corr)
-            if (score > bestScore) {
-                bestScore = score
+            val energy = corrI * corrI + corrQ * corrQ
+            if (energy > bestEnergy) {
+                bestEnergy = energy
                 bestOffset = cand
             }
         }
         return bestOffset
     }
 
-    /**
-     * 在已鎖定的直達波起始點附近 ±6 samples 內進行微調追蹤，防止硬體時脈微幅漂移。
-     */
     private fun refineSyncOffset(history4800: DoubleArray, currentOffset: Int): Int {
         var bestOffset = currentOffset
-        var bestScore = -1.0
-        val start = max(0, currentOffset - 6)
-        val end = min(FRAME_SAMPLES - 1, currentOffset + 6)
+        var bestEnergy = -1.0
+        val start = max(0, currentOffset - 8)
+        val end = min(FRAME_SAMPLES - 1, currentOffset + 8)
 
         for (cand in start..end) {
-            var corr = 0.0
+            var corrI = 0.0
+            var corrQ = 0.0
             for (n in 0 until CHIRP_SAMPLES step 2) {
-                corr += history4800[cand + n] * referenceChirp[n]
+                val sample = history4800[cand + n]
+                corrI += sample * referenceChirp[n]
+                corrQ += sample * referenceChirpQuad[n]
             }
-            val score = abs(corr)
-            if (score > bestScore) {
-                bestScore = score
+            val energy = corrI * corrI + corrQ * corrQ
+            if (energy > bestEnergy) {
+                bestEnergy = energy
                 bestOffset = cand
             }
         }

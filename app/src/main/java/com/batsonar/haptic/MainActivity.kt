@@ -80,6 +80,7 @@ class MainActivity : ComponentActivity() {
                     onToggleSonar = viewModel::toggleSonar,
                     onCalibrate = viewModel::triggerEnvironmentCalibration,
                     onMaxDistanceChange = viewModel::setMaxDetectDistance,
+                    onSensitivityChange = viewModel::setSensitivity,
                     onSilentModeChange = viewModel::setSilentVibrationMode,
                     onVoiceGuidanceChange = viewModel::setVoiceGuidanceEnabled,
                     onDismissError = viewModel::clearError
@@ -95,6 +96,7 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
         viewModel.onPermissionUpdated(granted)
+        viewModel.refreshMediaVolumeStatus()
     }
 
     override fun onStop() {

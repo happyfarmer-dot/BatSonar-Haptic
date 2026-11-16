@@ -67,7 +67,7 @@ class SonarAudioEngine(
         audioRecord = record
         isRunning.set(true)
 
-        val txFrame = ChirpGenerator.generateTxFramePcm16(amplitudeScale = 0.85)
+        val txFrame = ChirpGenerator.generateTxFramePcm16(amplitudeScale = 0.95)
 
         txThread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)

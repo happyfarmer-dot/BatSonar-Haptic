@@ -44,11 +44,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         with:
-          tag_name: v1.0.0
-          name: "BatSonar Haptic v1.0.0 (APK)"
+          tag_name: v1.1.0
+          name: "BatSonar Haptic v1.1.0 (APK)"
           body: |
-            ## 🦇 BatSonar Haptic v1.0.0
-            Samsung Galaxy S24 Ultra FMCW 超聲波避障與 X 軸線性馬達觸覺聲納
+            ## 🦇 BatSonar Haptic v1.1.0
+            Samsung Galaxy S24 Ultra FMCW 超聲波避障與 X 軸線性馬達觸覺聲納（增強 UNPROCESSED 低增益回波靈敏度與正交包絡對齊）
 
             ### 📦 安裝說明
             - 下載下方 Assets 中的 `app-debug.apk`。

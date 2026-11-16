@@ -63,6 +63,7 @@ fun SonarScreen(
     onToggleSonar: () -> Unit,
     onCalibrate: () -> Unit,
     onMaxDistanceChange: (Float) -> Unit,
+    onSensitivityChange: (Int) -> Unit,
     onSilentModeChange: (Boolean) -> Unit,
     onVoiceGuidanceChange: (Boolean) -> Unit,
     onDismissError: () -> Unit,
@@ -111,6 +112,25 @@ fun SonarScreen(
             }
 
             StatusBadge(uiState = uiState, accentColor = statusColor)
+        }
+
+        // 媒體音量過低警告（AudioTrack 需要足夠媒體音量才能發射 17-21 kHz 超聲波）
+        if (uiState.isMediaVolumeLow) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(SonarColors.AmberCaution.copy(alpha = 0.18f))
+                    .border(1.5.dp, SonarColors.AmberCaution, RoundedCornerShape(12.dp))
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = "⚠️ 媒體音量偏低：請將手機「媒體音量」調高至 70% 以上，確保揚聲器發出足夠強度的超聲波！",
+                    color = SonarColors.AmberCaution,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         // 錯誤訊息橫幅（若有）
@@ -311,6 +331,58 @@ fun SonarScreen(
                 Text("1.0 m", color = SonarColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 Text("2.0 m", color = SonarColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 Text("3.0 m", color = SonarColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        // 偵測靈敏度滑桿（1–10 級，預設 7）
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(SonarColors.SurfaceCard)
+                .border(1.dp, SonarColors.BorderMuted, RoundedCornerShape(16.dp))
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "回波偵測靈敏度",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SonarColors.TextPrimary
+                )
+                Text(
+                    text = "第 ${uiState.sensitivity} 級",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = SonarColors.SonarElectricBlue
+                )
+            }
+
+            Slider(
+                value = uiState.sensitivity.toFloat(),
+                onValueChange = { raw ->
+                    onSensitivityChange(kotlin.math.round(raw).toInt().coerceIn(1, 10))
+                },
+                valueRange = 1f..10f,
+                steps = 8,
+                colors = SliderDefaults.colors(
+                    thumbColor = SonarColors.SonarElectricBlue,
+                    activeTrackColor = SonarColors.SonarElectricBlue,
+                    inactiveTrackColor = SonarColors.SurfaceElevated
+                )
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("1 (抗噪)", color = SonarColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Text("7 (建議)", color = SonarColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Text("10 (極敏)", color = SonarColors.TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
         }
 

@@ -75,4 +75,59 @@ class FmcwProcessorTest {
             abs(dist - targetDistanceMeters) < 0.08
         )
     }
+
+    @Test
+    fun `detects weak UNPROCESSED-level echo at default sensitivity`() {
+        val processor = FmcwProcessor()
+        val refChirp = ChirpGenerator.generateReferenceChirp()
+        val frameSamples = ChirpGenerator.FRAME_SAMPLES
+        val hardwareOffset = 200
+
+        processor.startCalibration()
+        val calibStream = DoubleArray(frameSamples * 24) { 0.0 }
+        for (frameIdx in 0 until 24) {
+            val base = frameIdx * frameSamples + hardwareOffset
+            for (n in refChirp.indices) {
+                if (base + n < calibStream.size) {
+                    calibStream[base + n] += 0.015 * refChirp[n]
+                }
+            }
+        }
+
+        for (frameIdx in 0 until 22) {
+            val frame = calibStream.copyOfRange(frameIdx * frameSamples, (frameIdx + 1) * frameSamples)
+            processor.processFrame(frame, maxDistanceMeters = 3.0, sensitivity = 7)
+        }
+
+        val targetDistanceMeters = 0.85
+        val delaySamples = ((2.0 * targetDistanceMeters / FmcwProcessor.SPEED_OF_SOUND) *
+            FmcwProcessor.SAMPLE_RATE).roundToInt()
+
+        val echoStream = DoubleArray(frameSamples * 6) { 0.0 }
+        for (frameIdx in 0 until 6) {
+            val base = frameIdx * frameSamples + hardwareOffset
+            for (n in refChirp.indices) {
+                if (base + n < echoStream.size) {
+                    echoStream[base + n] += 0.015 * refChirp[n]
+                }
+                if (base + delaySamples + n < echoStream.size) {
+                    echoStream[base + delaySamples + n] += 0.0005 * refChirp[n]
+                }
+            }
+        }
+
+        var measured: FmcwMeasurement? = null
+        for (frameIdx in 0 until 6) {
+            val frame = echoStream.copyOfRange(frameIdx * frameSamples, (frameIdx + 1) * frameSamples)
+            measured = processor.processFrame(frame, maxDistanceMeters = 3.0, sensitivity = 7)
+        }
+
+        assertNotNull(measured)
+        assertTrue("Expected weak echo (0.0005) to be detected at sensitivity 7", measured!!.obstacleDetected)
+        val dist = measured.distanceMeters!!
+        assertTrue(
+            "Measured distance $dist m should be within 0.10m of $targetDistanceMeters m",
+            abs(dist - targetDistanceMeters) < 0.10
+        )
+    }
 }

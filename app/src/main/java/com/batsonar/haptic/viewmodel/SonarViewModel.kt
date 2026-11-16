@@ -2,6 +2,7 @@ package com.batsonar.haptic.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.media.AudioManager
 import android.os.PowerManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -28,6 +29,7 @@ class SonarViewModel(application: Application) : AndroidViewModel(application) {
     private val hapticController = HapticSonarController(application, viewModelScope)
     private val voiceController = VoiceGuidanceController(application)
 
+    private val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val powerManager = application.getSystemService(Context.POWER_SERVICE) as PowerManager
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -45,10 +47,20 @@ class SonarViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     fun onPermissionUpdated(granted: Boolean) {
-        _uiState.update { it.copy(hasAudioPermission = granted, errorMessage = null) }
+        _uiState.update {
+            it.copy(
+                hasAudioPermission = granted,
+                isMediaVolumeLow = isMediaVolumeInsufficient(),
+                errorMessage = null
+            )
+        }
         if (!granted && _uiState.value.isSonarRunning) {
             stopSonar()
         }
+    }
+
+    fun refreshMediaVolumeStatus() {
+        _uiState.update { it.copy(isMediaVolumeLow = isMediaVolumeInsufficient()) }
     }
 
     fun toggleSonar() {
@@ -88,6 +100,8 @@ class SonarViewModel(application: Application) : AndroidViewModel(application) {
                 distanceMeters = null,
                 echoStrength = 0f,
                 snrRatio = 0f,
+                rxRms = 0f,
+                isMediaVolumeLow = isMediaVolumeInsufficient(),
                 errorMessage = null
             )
         }
@@ -109,14 +123,12 @@ class SonarViewModel(application: Application) : AndroidViewModel(application) {
                 distanceMeters = null,
                 echoStrength = 0f,
                 snrRatio = 0f,
+                rxRms = 0f,
                 spectrumBins = emptyList()
             )
         }
     }
 
-    /**
-     * 一鍵環境校準：若聲納運作中則立即重新對空採集 1 秒基線；若待命中則直接啟動並校準。
-     */
     fun triggerEnvironmentCalibration() {
         if (!_uiState.value.hasAudioPermission) {
             _uiState.update { it.copy(errorMessage = "請先授予麥克風錄音權限") }
@@ -132,7 +144,8 @@ class SonarViewModel(application: Application) : AndroidViewModel(application) {
                     hasCalibration = false,
                     obstacleDetected = false,
                     distanceMeters = null,
-                    echoStrength = 0f
+                    echoStrength = 0f,
+                    isMediaVolumeLow = isMediaVolumeInsufficient()
                 )
             }
         } else {
@@ -144,6 +157,10 @@ class SonarViewModel(application: Application) : AndroidViewModel(application) {
         val clamped = meters.coerceIn(1.0f, 3.0f)
         _uiState.update { it.copy(maxDetectDistanceMeters = clamped) }
         hapticController.updateMeasurement(_uiState.value.distanceMeters, clamped)
+    }
+
+    fun setSensitivity(level: Int) {
+        _uiState.update { it.copy(sensitivity = level.coerceIn(1, 10)) }
     }
 
     fun setSilentVibrationMode(enabled: Boolean) {
@@ -175,7 +192,8 @@ class SonarViewModel(application: Application) : AndroidViewModel(application) {
         val stateSnapshot = _uiState.value
         val result = fmcwProcessor.processFrame(
             rxFrame2400 = frameSamples,
-            maxDistanceMeters = stateSnapshot.maxDetectDistanceMeters.toDouble()
+            maxDistanceMeters = stateSnapshot.maxDetectDistanceMeters.toDouble(),
+            sensitivity = stateSnapshot.sensitivity
         )
 
         val dist = if (result.obstacleDetected) result.distanceMeters else null
@@ -198,9 +216,16 @@ class SonarViewModel(application: Application) : AndroidViewModel(application) {
                 distanceMeters = dist,
                 echoStrength = result.echoStrength,
                 snrRatio = result.snrRatio,
+                rxRms = result.rxRms,
                 spectrumBins = result.spectrumSlice.toList()
             )
         }
+    }
+
+    private fun isMediaVolumeInsufficient(): Boolean {
+        val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        return currentVol.toFloat() / maxVol.toFloat() < 0.50f
     }
 
     private fun acquireWakeLock() {
@@ -213,7 +238,7 @@ class SonarViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         if (wakeLock?.isHeld == false) {
-            wakeLock?.acquire(60 * 60 * 1000L) // 最長 1 小時安全逾時
+            wakeLock?.acquire(60 * 60 * 1000L)
         }
     }
 
