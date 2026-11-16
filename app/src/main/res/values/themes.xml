@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.BatSonarHaptic" parent="android:Theme.Material.NoTitleBar">
+        <item name="android:windowBackground">@color/sonar_black</item>
+        <item name="android:statusBarColor">@color/sonar_black</item>
+        <item name="android:navigationBarColor">@color/sonar_black</item>
+    </style>
+</resources>

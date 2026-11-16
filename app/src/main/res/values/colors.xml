@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="sonar_black">#FF000000</color>
+    <color name="sonar_cyan">#FF00FFAA</color>
+</resources>
